@@ -6,6 +6,7 @@
 
 import argparse
 import datetime
+import enum
 import logging
 import json
 import os
@@ -30,6 +31,16 @@ CHR_A = ord("A")
 
 # CAP-AU XML namespace
 CAP_NS = {"cap": "urn:oasis:names:tc:emergency:cap:1.2"}
+
+
+# CAP-AU severity levels
+class SeverityLevel(enum.IntEnum):
+    Unknown = 0
+    Minor = 1
+    Moderate = 2
+    Severe = 3
+    Extreme = 4
+
 
 # Jinja2 template environment
 jinja2_env = jinja2.Environment(autoescape=jinja2.select_autoescape())
@@ -305,7 +316,8 @@ with tempfile.TemporaryDirectory() as tmpdir:
             for row in cur:
                 db_alert = dict(zip((c[0] for c in cur.description), row))
                 alert_log.debug("Observed %r", db_alert)
-                mstdn_status_id = db_alert.get("mstdn_status_id")
+                prev_sev_level = SeverityLevel[db_alert["info_severity"]]
+                mstdn_status_id = db_alert["mstdn_status_id"]
                 break
 
             if db_alert and (db_alert["msg_sent"] == alert_tags["sent"]):
@@ -333,6 +345,8 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 if field in alert_tags:
                     alert_tags[field] = cleanup_html(alert_tags[field])
 
+            cur_sev_level = SeverityLevel[alert_tags["severity"]]
+
             alert_polygon = alert_info.find(
                 "./cap:area/cap:polygon", namespaces=CAP_NS
             )
@@ -357,9 +371,8 @@ with tempfile.TemporaryDirectory() as tmpdir:
             timestamp = datetime.datetime.fromisoformat(alert_tags["sent"])
 
             # Do we need to do anything with this alert?
-            if (alert_tags["severity"] not in ("Extreme", "Severe")) and (
-                (db_alert is None)
-                or (db_alert["info_severity"] not in ("Extreme", "Severe"))
+            if (cur_sev_level < SeverityLevel.Severe) and (
+                (db_alert is None) or (prev_sev_level < SeverityLevel.Severe)
             ):
                 alert_log.info(
                     "Ignoring alert of severity %r", alert_tags["severity"]
