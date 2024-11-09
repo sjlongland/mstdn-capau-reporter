@@ -55,6 +55,7 @@ ap.add_argument("config_yml", help="Configuration File")
 args = ap.parse_args()
 
 config = yaml.safe_load(open(args.config_yml, "r").read())
+MIN_SEV_LEVEL = SeverityLevel[config.get("min_severity_level", "Moderate")]
 STYLES = config.get("styles", {})
 ZOOM_LEVELS = config.get("zoom_levels", ["auto"])
 MAP_DIMENSIONS = config.get("map_size", dict(width=800, height=500))
@@ -371,8 +372,8 @@ with tempfile.TemporaryDirectory() as tmpdir:
             timestamp = datetime.datetime.fromisoformat(alert_tags["sent"])
 
             # Do we need to do anything with this alert?
-            if (cur_sev_level < SeverityLevel.Severe) and (
-                (db_alert is None) or (prev_sev_level < SeverityLevel.Severe)
+            if (cur_sev_level < MIN_SEV_LEVEL) and (
+                (db_alert is None) or (prev_sev_level < MIN_SEV_LEVEL)
             ):
                 alert_log.info(
                     "Ignoring alert of severity %r", alert_tags["severity"]

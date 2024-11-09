@@ -1,6 +1,8 @@
 sources:
   qfes: "https://publiccontent-gis-psba-qld-gov-au.s3.amazonaws.com/content/Feeds/BushfireCurrentIncidents/bushfireAlert_capau.xml"
 
+min_severity_level: Moderate
+
 status_db: status.db
 
 styles:
