@@ -82,6 +82,7 @@ mastodon = Mastodon(**config["mastodon"])
 rqsession = requests.Session()
 
 logging.basicConfig(level=logging.DEBUG)
+logging.getLogger("PIL").setLevel(logging.INFO)
 log = logging.getLogger("capau_alerter")
 
 status_db.execute(
