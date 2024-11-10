@@ -50,6 +50,13 @@ BR_RE = re.compile(r"<br */*>")
 A_RE = re.compile(r'<a *href="([^"]+)" *>([^<>]+)</a>')
 
 ap = argparse.ArgumentParser()
+ap.add_argument(
+    "--dry-run",
+    help="Capture data, but don't record changes",
+    action="store_const",
+    default=False,
+    const=True,
+)
 ap.add_argument("config_yml", help="Configuration File")
 
 args = ap.parse_args()
@@ -156,6 +163,10 @@ def cleanup_html(text):
 
 
 def update_db(src, alert_tags, mstdn_status_id=None):
+    if args.dry_run:
+        log.info("Dry run mode, not updating status")
+        return
+
     status_db.execute(
         """
 INSERT INTO alerts (
@@ -280,11 +291,17 @@ with tempfile.TemporaryDirectory() as tmpdir:
             f.write(response.text)
 
         if "ETag" in response.headers:
-            status_db.execute("""
-                INSERT INTO sources (src, uri, etag) VALUES (?, ?, ?);
-            """, (src, src_uri, response.headers["ETag"]))
-            status_db.commit()
-            src_log.info("Source file ETag recorded")
+            if args.dry_run:
+                log.info("Dry run mode, not updating status")
+            else:
+                status_db.execute(
+                    """
+                    INSERT INTO sources (src, uri, etag) VALUES (?, ?, ?);
+                """,
+                    (src, src_uri, response.headers["ETag"]),
+                )
+                status_db.commit()
+                src_log.info("Source file ETag recorded")
 
         alerts_xmldoc = lxml.etree.parse(src_file)
         for alert in alerts_xmldoc.iterfind(
@@ -383,6 +400,13 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
             files = []
             for zoomlevel in ZOOM_LEVELS:
+                if args.dry_run:
+                    alert_log.info(
+                        "Skipping image at zoom level %s due to dry-run mode",
+                        zoomlevel,
+                    )
+                    continue
+
                 context = staticmaps.Context()
                 context.set_tile_provider(staticmaps.tile_provider_OSM)
 
@@ -467,15 +491,22 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 files.append(imagefile)
 
             alert_log.info("Generated %d images", len(files))
+
+            post_text = jinja2_env.from_string(
+                config["post_template"]
+            ).render(**alert_tags)
+
+            if args.dry_run:
+                alert_log.info("Would post:\n%s", post_text)
+                continue
+
             media_ids = [
                 mastodon.media_post(
                     media_file=file, mime_type="image/png"
                 )
                 for file in files
             ]
-            post_text = jinja2_env.from_string(
-                config["post_template"]
-            ).render(**alert_tags)
+
             if mstdn_status_id is None:
                 post = mastodon.status_post(
                     status=post_text,
