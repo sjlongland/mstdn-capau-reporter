@@ -2,6 +2,15 @@ sources:
   # Queensland Fire Department
   qfd:
     uri: "https://publiccontent-gis-psba-qld-gov-au.s3.amazonaws.com/content/Feeds/BushfireCurrentIncidents/bushfireAlert_capau.xml"
+    tagregex:
+      - field: headline
+        regex: "^([A-Z ]+)(?: \\((HAZARD REDUCTION BURN)\\))? - ([^()]+)(?: +\\((?:near )?(.+)\\))? - fire as at.*$"
+        tags:
+          - template: '{{tag}}'
+          - template: '{{tag}}'
+          - template: '{{tag}} Qld'
+            transform: 'tag.replace(" and ", ", ").split(", ")'
+          - template: '{{tag}} Qld'
 
     post_template: |
       DISCLAIMER: This is an unofficial and experimental service run by a third party.

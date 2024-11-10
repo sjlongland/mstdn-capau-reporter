@@ -22,6 +22,9 @@ import requests
 import staticmaps
 import yaml
 
+# Tag creation regexes
+UNSAFE_TAG_CHARS_RE = re.compile(r"[^A-Za-z0-9 ]+")
+
 # Maidenhead constants
 FIELD_LNG_ANGLE = 20
 FIELD_LAT_ANGLE = 10
@@ -117,6 +120,63 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 """
 )
+
+
+class TagRegex(object):
+    def __init__(self, field, regex, tags, log):
+        self._field = field
+        self._tags = tags
+        self._log = log
+        try:
+            self._regex = re.compile(regex)
+        except:
+            log.exception(
+                "Failed to compile regex %r for field %r", regex, field
+            )
+            raise
+
+    def extract(self, alert_tags):
+        if self._field not in alert_tags:
+            self._log.debug("%r not in %r", self._field, alert_tags)
+            return
+
+        field = alert_tags[self._field]
+        match = self._regex.match(field)
+
+        if not match:
+            self._log.debug(
+                "%r does not match %r in %r",
+                self._field,
+                self._regex,
+                alert_tags,
+            )
+            return
+
+        for tagconfig, matchvalue in zip(self._tags, match.groups()):
+            if matchvalue is None:
+                continue
+            template = jinja2_env.from_string(tagconfig["template"])
+
+            if "transform" in tagconfig:
+                values = eval(
+                    tagconfig["transform"], {}, dict(tag=matchvalue)
+                )
+                self._log.debug("Transformed %r to %r", matchvalue, values)
+            else:
+                values = [matchvalue]
+
+            for matchvalue in values:
+                tagvalue = template.render(tag=matchvalue)
+                tag = self.mktag(tagvalue)
+                self._log.debug(
+                    "Extracted from %r tag %r: %r", matchvalue, tagvalue, tag
+                )
+                yield tag
+
+    @staticmethod
+    def mktag(s):
+        s = UNSAFE_TAG_CHARS_RE.sub("", s).strip()
+        return "".join((w.title() for w in s.split(" ")))
 
 
 def get_gridsq(lat, lng):
@@ -273,6 +333,11 @@ with tempfile.TemporaryDirectory() as tmpdir:
         ), "Post template must be defined either globally or per source"
         post_template = jinja2_env.from_string(post_template_src)
 
+        tagregexes = [
+            TagRegex(**tagcfg, log=src_log.getChild("tagregex%d" % idx))
+            for (idx, tagcfg) in enumerate(src_cfg.get("tagregex", []))
+        ]
+
         # Look for the last ETag value
         src_last = None
         cur = status_db.cursor()
@@ -376,6 +441,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
                     alert_tags[field] = cleanup_html(alert_tags[field])
 
             cur_sev_level = SeverityLevel[alert_tags["severity"]]
+
+            mstdn_tags = []
+            for tagregex in tagregexes:
+                mstdn_tags.extend(tagregex.extract(alert_tags))
 
             alert_polygon = alert_info.find(
                 "./cap:area/cap:polygon", namespaces=CAP_NS
@@ -504,7 +573,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
             alert_log.info("Generated %d images", len(files))
 
-            post_text = post_template.render(**alert_tags)
+            post_text = post_template.render(**alert_tags).rstrip()
+
+            for tag in mstdn_tags:
+                post_text += " #%s" % tag
 
             if args.dry_run:
                 alert_log.info("Would post:\n%s", post_text)
