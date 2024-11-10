@@ -259,9 +259,21 @@ INSERT INTO alerts (
 
 
 with tempfile.TemporaryDirectory() as tmpdir:
-    for src, src_uri in config["sources"].items():
-        # Look for the last ETag value
+    for src, src_cfg in config["sources"].items():
         src_log = log.getChild("sources.%s" % src)
+
+        if isinstance(src_cfg, str):
+            src_cfg = dict(uri=src_cfg)
+
+        post_template_src = src_cfg.get(
+            "post_template", config.get("post_template")
+        )
+        assert (
+            post_template_src is not None
+        ), "Post template must be defined either globally or per source"
+        post_template = jinja2_env.from_string(post_template_src)
+
+        # Look for the last ETag value
         src_last = None
         cur = status_db.cursor()
         cur.execute(
@@ -272,11 +284,11 @@ with tempfile.TemporaryDirectory() as tmpdir:
             src_last = dict(zip((c[0] for c in cur.description), row))
             break
 
-        if (src_last is not None) and (src_last["uri"] != src_uri):
+        if (src_last is not None) and (src_last["uri"] != src_cfg["uri"]):
             src_last = None
 
         if src_last is not None:
-            response = rqsession.head(src_uri)
+            response = rqsession.head(src_cfg["uri"])
             try:
                 if src_last["etag"] == response.headers["Etag"]:
                     src_log.info("Source file has not changed")
@@ -286,7 +298,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
         src_file = os.path.join(tmpdir, "%s.xml" % src)
 
-        response = rqsession.get(src_uri)
+        response = rqsession.get(src_cfg["uri"])
         with open(src_file, "w") as f:
             f.write(response.text)
 
@@ -298,7 +310,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
                     """
                     INSERT INTO sources (src, uri, etag) VALUES (?, ?, ?);
                 """,
-                    (src, src_uri, response.headers["ETag"]),
+                    (src, src_cfg["uri"], response.headers["ETag"]),
                 )
                 status_db.commit()
                 src_log.info("Source file ETag recorded")
@@ -492,18 +504,14 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
             alert_log.info("Generated %d images", len(files))
 
-            post_text = jinja2_env.from_string(
-                config["post_template"]
-            ).render(**alert_tags)
+            post_text = post_template.render(**alert_tags)
 
             if args.dry_run:
                 alert_log.info("Would post:\n%s", post_text)
                 continue
 
             media_ids = [
-                mastodon.media_post(
-                    media_file=file, mime_type="image/png"
-                )
+                mastodon.media_post(media_file=file, mime_type="image/png")
                 for file in files
             ]
 

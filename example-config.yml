@@ -1,5 +1,22 @@
 sources:
-  qfes: "https://publiccontent-gis-psba-qld-gov-au.s3.amazonaws.com/content/Feeds/BushfireCurrentIncidents/bushfireAlert_capau.xml"
+  # Queensland Fire Department
+  qfd:
+    uri: "https://publiccontent-gis-psba-qld-gov-au.s3.amazonaws.com/content/Feeds/BushfireCurrentIncidents/bushfireAlert_capau.xml"
+
+    post_template: |
+      DISCLAIMER: This is an unofficial and experimental service run by a third party.
+      See https://www.fire.qld.gov.au/Current-Incidents for official warnings from
+      the QFD.  DO NOT RELY ON THIS SERVICE FOR TIMELY EMERGENCY WARNINGS.
+
+      {{headline}} ({{identifier}})
+      Severity: {{severity}} Action: {{responseType}}
+      Expires: {{expires}}
+
+      {{description}}
+
+      {{instruction}}
+
+      #BushfireWarning #{{grid}}
 
 min_severity_level: Moderate
 
@@ -42,17 +59,3 @@ mastodon:
   access_token: Insert Your Token Here
   api_base_url: https://mastodon.example.com
 
-post_template: |
-  DISCLAIMER: This is an unofficial and experimental service run by a third party.
-  See https://www.fire.qld.gov.au/Current-Incidents for official warnings from
-  the QFES.  DO NOT RELY ON THIS SERVICE FOR TIMELY EMERGENCY WARNINGS.
-
-  {{headline}} ({{identifier}})
-  Severity: {{severity}} Action: {{responseType}}
-  Expires: {{expires}}
-
-  {{description}}
-
-  {{instruction}}
-
-  #BushfireWarning #{{grid}}
