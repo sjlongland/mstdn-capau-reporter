@@ -324,6 +324,12 @@ INSERT INTO alerts (
         ),
     )
     status_db.commit()
+    log.info(
+        "Recorded %s alert %s as ID %s",
+        src,
+        alert_tags["identifier"],
+        mstdn_status_id,
+    )
 
 
 with tempfile.TemporaryDirectory() as tmpdir:
@@ -410,6 +416,11 @@ with tempfile.TemporaryDirectory() as tmpdir:
             alert_log = log.getChild("alert.%s" % alert_tags["identifier"])
 
             # Look for the alert in the database
+            alert_log.debug(
+                "Searching for alert src=%r and msg_id=%r",
+                src,
+                alert_tags["identifier"],
+            )
             cur = status_db.cursor()
             cur.execute(
                 "SELECT * FROM alerts WHERE src=? AND msg_id=?;",
@@ -422,7 +433,13 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 alert_log.debug("Observed %r", db_alert)
                 prev_sev_level = SeverityLevel[db_alert["info_severity"]]
                 mstdn_status_id = db_alert["mstdn_status_id"]
+                alert_log.info(
+                    "Previously reported as post %r", mstdn_status_id
+                )
                 break
+
+            if mstdn_status_id is None:
+                alert_log.info("Alert is NEW")
 
             if db_alert and (db_alert["msg_sent"] == alert_tags["sent"]):
                 alert_log.info("Alert is unchanged")
@@ -588,7 +605,15 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 post_text += " #%s" % tag
 
             if args.dry_run:
-                alert_log.info("Would post:\n%s", post_text)
+                alert_log.info(
+                    "Would post:\n%s\n…%s",
+                    post_text,
+                    (
+                        "as new post"
+                        if mstdn_status_id is None
+                        else ("as update to %r" % mstdn_status_id)
+                    ),
+                )
                 continue
 
             media_ids = [
@@ -601,6 +626,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
                     status=post_text,
                     media_ids=media_ids,
                 )
+                alert_log.debug("Post result: %r", post)
                 mstdn_status_id = post["id"]
             else:
                 mastodon.status_update(
