@@ -60,6 +60,13 @@ ap.add_argument(
     default=False,
     const=True,
 )
+ap.add_argument(
+    "--ignore-etag",
+    help="Ignore the ETag",
+    action="store_const",
+    default=False,
+    const=True,
+)
 ap.add_argument("config_yml", help="Configuration File")
 
 args = ap.parse_args()
@@ -340,26 +347,27 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
         # Look for the last ETag value
         src_last = None
-        cur = status_db.cursor()
-        cur.execute(
-            "SELECT * FROM sources WHERE src=?;",
-            (src,),
-        )
-        for row in cur:
-            src_last = dict(zip((c[0] for c in cur.description), row))
-            break
+        if not args.ignore_etag:
+            cur = status_db.cursor()
+            cur.execute(
+                "SELECT * FROM sources WHERE src=?;",
+                (src,),
+            )
+            for row in cur:
+                src_last = dict(zip((c[0] for c in cur.description), row))
+                break
 
-        if (src_last is not None) and (src_last["uri"] != src_cfg["uri"]):
-            src_last = None
+            if (src_last is not None) and (src_last["uri"] != src_cfg["uri"]):
+                src_last = None
 
-        if src_last is not None:
-            response = rqsession.head(src_cfg["uri"])
-            try:
-                if src_last["etag"] == response.headers["Etag"]:
-                    src_log.info("Source file has not changed")
-                    continue
-            except KeyError:
-                pass
+            if src_last is not None:
+                response = rqsession.head(src_cfg["uri"])
+                try:
+                    if src_last["etag"] == response.headers["Etag"]:
+                        src_log.info("Source file has not changed")
+                        continue
+                except KeyError:
+                    pass
 
         src_file = os.path.join(tmpdir, "%s.xml" % src)
 
