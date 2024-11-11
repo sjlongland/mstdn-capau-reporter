@@ -4,7 +4,7 @@ sources:
     uri: "https://publiccontent-gis-psba-qld-gov-au.s3.amazonaws.com/content/Feeds/BushfireCurrentIncidents/bushfireAlert_capau.xml"
     tagregex:
       - field: headline
-        regex: "^([A-Z ]+)(?: \\((HAZARD REDUCTION BURN)\\))? - ([^()]+)(?: +\\((?:near )?(.+)\\))? - fire as at.*$"
+        regex: "^([A-Z ]+)?(?: \\((HAZARD REDUCTION BURN)\\))?(?:[A-Za-z ]+)? - ([^()-]+)(?: +\\((?:near )?(.+)\\))?(?: - Multiple Warnings)? - fire as at.*$"
         tags:
           - template: '{{tag}}'
           - template: '{{tag}}'
@@ -28,8 +28,6 @@ sources:
       #BushfireWarning #{{grid}}
 
 min_severity_level: Moderate
-
-status_db: status.db
 
 styles:
   _DEFAULT_:
@@ -60,11 +58,10 @@ map_size:
 
 zoom_levels:
   - auto
-  - 8
-  - 12
-  - 16
+  - 6
+  - 10
+  - 14
 
 mastodon:
   access_token: Insert Your Token Here
   api_base_url: https://mastodon.example.com
-
