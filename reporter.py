@@ -491,14 +491,11 @@ with lock:
                     mstdn_tags.extend(tagregex.extract(alert_tags))
 
                 _tags = set(mstdn_tags)
-                for param in ("Location", "AlertLevel", "IncidentType"):
+                for param in ("AlertLevel", "IncidentType"):
                     try:
                         value = alert_params[param]
                     except KeyError:
                         continue
-
-                    if param == "Location":
-                        value += " Qld"
 
                     tag = TagRegex.mktag(value)
                     if tag in _tags:
