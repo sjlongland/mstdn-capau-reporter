@@ -334,6 +334,7 @@ INSERT INTO alerts (
     )
 
 
+assert not lock.is_locked(), "Report generation in progress"
 with lock:
     with tempfile.TemporaryDirectory() as tmpdir:
         for src, src_cfg in config["sources"].items():
