@@ -69,6 +69,13 @@ ap.add_argument(
     default=False,
     const=True,
 )
+ap.add_argument(
+    "--ignore-sent",
+    help="Ignore the event 'sent' field",
+    action="store_const",
+    default=False,
+    const=True,
+)
 ap.add_argument("config_yml", help="Configuration File")
 
 args = ap.parse_args()
@@ -438,7 +445,11 @@ with lock:
                     mstdn_status_id = db_alert["mstdn_status_id"]
                     break
 
-                if db_alert and (db_alert["msg_sent"] == alert_tags["sent"]):
+                if (
+                    not args.ignore_sent
+                    and db_alert
+                    and (db_alert["msg_sent"] == alert_tags["sent"])
+                ):
                     alert_log.info("Alert is unchanged")
                     continue
 
