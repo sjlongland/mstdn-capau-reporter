@@ -7,6 +7,7 @@
 import argparse
 import datetime
 import enum
+import html
 import logging
 import json
 import os
@@ -229,7 +230,7 @@ def cleanup_html(text):
     while A_RE.search(text):
         text = A_RE.sub(r"\1 ← \2", text)
 
-    return text
+    return html.unescape(text)
 
 
 def update_db(src, alert_tags, mstdn_status_id=None):
