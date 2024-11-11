@@ -17,6 +17,7 @@ import tempfile
 
 from mastodon import Mastodon
 import jinja2
+import lockfile
 import lxml.etree
 import requests
 import staticmaps
@@ -77,6 +78,7 @@ STYLES = config.get("styles", {})
 ZOOM_LEVELS = config.get("zoom_levels", ["auto"])
 MAP_DIMENSIONS = config.get("map_size", dict(width=800, height=500))
 
+lock = lockfile.LockFile(config.get("lockfile", args.config_yml))
 status_db = sqlite3.connect(config["status_db"])
 mastodon = Mastodon(**config["mastodon"])
 rqsession = requests.Session()
@@ -332,309 +334,332 @@ INSERT INTO alerts (
     )
 
 
-with tempfile.TemporaryDirectory() as tmpdir:
-    for src, src_cfg in config["sources"].items():
-        src_log = log.getChild("sources.%s" % src)
+with lock:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for src, src_cfg in config["sources"].items():
+            src_log = log.getChild("sources.%s" % src)
 
-        if isinstance(src_cfg, str):
-            src_cfg = dict(uri=src_cfg)
+            if isinstance(src_cfg, str):
+                src_cfg = dict(uri=src_cfg)
 
-        post_template_src = src_cfg.get(
-            "post_template", config.get("post_template")
-        )
-        assert (
-            post_template_src is not None
-        ), "Post template must be defined either globally or per source"
-        post_template = jinja2_env.from_string(post_template_src)
-
-        tagregexes = [
-            TagRegex(**tagcfg, log=src_log.getChild("tagregex%d" % idx))
-            for (idx, tagcfg) in enumerate(src_cfg.get("tagregex", []))
-        ]
-
-        # Look for the last ETag value
-        src_last = None
-        if not args.ignore_etag:
-            cur = status_db.cursor()
-            cur.execute(
-                "SELECT * FROM sources WHERE src=?;",
-                (src,),
+            post_template_src = src_cfg.get(
+                "post_template", config.get("post_template")
             )
-            for row in cur:
-                src_last = dict(zip((c[0] for c in cur.description), row))
-                break
+            assert (
+                post_template_src is not None
+            ), "Post template must be defined either globally or per source"
+            post_template = jinja2_env.from_string(post_template_src)
 
-            if (src_last is not None) and (src_last["uri"] != src_cfg["uri"]):
-                src_last = None
+            tagregexes = [
+                TagRegex(**tagcfg, log=src_log.getChild("tagregex%d" % idx))
+                for (idx, tagcfg) in enumerate(src_cfg.get("tagregex", []))
+            ]
 
-            if src_last is not None:
-                response = rqsession.head(src_cfg["uri"])
-                try:
-                    if src_last["etag"] == response.headers["Etag"]:
-                        src_log.info("Source file has not changed")
-                        continue
-                except KeyError:
-                    pass
-
-        src_file = os.path.join(tmpdir, "%s.xml" % src)
-
-        response = rqsession.get(src_cfg["uri"])
-        with open(src_file, "w") as f:
-            f.write(response.text)
-
-        src_etag = response.headers.get("ETag")
-
-        alerts_xmldoc = lxml.etree.parse(src_file)
-        for alert in alerts_xmldoc.iterfind(
-            ".//cap:alert", namespaces=CAP_NS
-        ):
-
-            alert_tags = dict(
-                [
-                    (t, alert.find("./cap:%s" % t, namespaces=CAP_NS).text)
-                    for t in (
-                        "identifier",
-                        "sent",
-                        "status",
-                        "msgType",
-                        "scope",
-                    )
-                ]
-            )
-
-            alert_log = log.getChild("alert.%s" % alert_tags["identifier"])
-
-            # Look for the alert in the database
-            alert_log.debug(
-                "Searching for alert src=%r and msg_id=%r",
-                src,
-                alert_tags["identifier"],
-            )
-            cur = status_db.cursor()
-            cur.execute(
-                "SELECT * FROM alerts WHERE src=? AND msg_id=?;",
-                (src, alert_tags["identifier"]),
-            )
-            db_alert = None
-            mstdn_status_id = None
-            for row in cur:
-                db_alert = dict(zip((c[0] for c in cur.description), row))
-                alert_log.debug("Observed %r", db_alert)
-                prev_sev_level = SeverityLevel[db_alert["info_severity"]]
-                mstdn_status_id = db_alert["mstdn_status_id"]
-                alert_log.info(
-                    "Previously reported as post %r", mstdn_status_id
+            # Look for the last ETag value
+            src_last = None
+            if not args.ignore_etag:
+                cur = status_db.cursor()
+                cur.execute(
+                    "SELECT * FROM sources WHERE src=?;",
+                    (src,),
                 )
-                break
+                for row in cur:
+                    src_last = dict(zip((c[0] for c in cur.description), row))
+                    break
 
-            if mstdn_status_id is None:
-                alert_log.info("Alert is NEW")
+                if (src_last is not None) and (
+                    src_last["uri"] != src_cfg["uri"]
+                ):
+                    src_last = None
 
-            if db_alert and (db_alert["msg_sent"] == alert_tags["sent"]):
-                alert_log.info("Alert is unchanged")
-                continue
-
-            alert_info = alert.find("./cap:info", namespaces=CAP_NS)
-            for t in (
-                "language",
-                "category",
-                "responseType",
-                "certainty",
-                "expires",
-                "senderName",
-                "severity",
-                "headline",
-                "description",
-                "instruction",
-            ):
-                alert_tags[t] = alert_info.find(
-                    "./cap:%s" % t, namespaces=CAP_NS
-                ).text
-
-            for field in ("description", "instruction"):
-                if field in alert_tags:
-                    alert_tags[field] = cleanup_html(alert_tags[field])
-
-            cur_sev_level = SeverityLevel[alert_tags["severity"]]
-
-            mstdn_tags = []
-            for tagregex in tagregexes:
-                mstdn_tags.extend(tagregex.extract(alert_tags))
-
-            alert_polygon = alert_info.find(
-                "./cap:area/cap:polygon", namespaces=CAP_NS
-            )
-            alert_circle = alert_info.find(
-                "./cap:area/cap:circle", namespaces=CAP_NS
-            )
-            if alert_polygon is not None:
-                alert_tags["polygon"] = [
-                    tuple((float(v) for v in c.split(",")))
-                    for c in alert_polygon.text.split(" ")
-                ]
-
-            if alert_circle is not None:
-                (circle_coord_str, radius_str) = alert_circle.text.split(" ")
-                alert_tags["position"] = tuple(
-                    (float(v) for v in circle_coord_str.split(","))
-                )
-                alert_tags["radius"] = float(radius_str)
-                alert_tags["grid"] = get_gridsq(*alert_tags["position"])
-
-            alert_log.debug("Extracted alert: %r", alert_tags)
-            timestamp = datetime.datetime.fromisoformat(alert_tags["sent"])
-
-            # Do we need to do anything with this alert?
-            if (cur_sev_level < MIN_SEV_LEVEL) and (
-                (db_alert is None) or (prev_sev_level < MIN_SEV_LEVEL)
-            ):
-                alert_log.info(
-                    "Ignoring alert of severity %r", alert_tags["severity"]
-                )
-                update_db(src, alert_tags, mstdn_status_id)
-                continue
-
-            files = []
-            for zoomlevel in ZOOM_LEVELS:
-                if args.dry_run:
-                    alert_log.info(
-                        "Skipping image at zoom level %s due to dry-run mode",
-                        zoomlevel,
-                    )
-                    continue
-
-                context = staticmaps.Context()
-                context.set_tile_provider(staticmaps.tile_provider_OSM)
-
-                # Style information
-                style = STYLES.get("_DEFAULT_", {})
-                for field, styleinfo in STYLES.items():
-                    if field == "_DEFAULT_":
-                        continue
-
+                if src_last is not None:
+                    response = rqsession.head(src_cfg["uri"])
                     try:
-                        value = alert_tags[field]
-                    except KeyError:
-                        continue
-
-                    try:
-                        valuestyle = styleinfo[value]
+                        if src_last["etag"] == response.headers["Etag"]:
+                            src_log.info("Source file has not changed")
+                            continue
                     except KeyError:
                         pass
 
-                    style.update(valuestyle)
+            src_file = os.path.join(tmpdir, "%s.xml" % src)
 
-                if "polygon" in alert_tags:
-                    context.add_object(
-                        staticmaps.Area(
-                            [
-                                staticmaps.create_latlng(lat, lng)
-                                for lat, lng in alert_tags["polygon"]
-                            ],
-                            fill_color=(
-                                staticmaps.parse_color(style["fill_color"])
-                                if "fill_color" in style
-                                else None
-                            ),
-                            width=style.get("width"),
-                            color=(
-                                staticmaps.parse_color(style["color"])
-                                if "color" in style
-                                else None
-                            ),
+            response = rqsession.get(src_cfg["uri"])
+            with open(src_file, "w") as f:
+                f.write(response.text)
+
+            src_etag = response.headers.get("ETag")
+
+            alerts_xmldoc = lxml.etree.parse(src_file)
+            for alert in alerts_xmldoc.iterfind(
+                ".//cap:alert", namespaces=CAP_NS
+            ):
+
+                alert_tags = dict(
+                    [
+                        (
+                            t,
+                            alert.find(
+                                "./cap:%s" % t, namespaces=CAP_NS
+                            ).text,
                         )
-                    )
-                elif ("position" in alert_tags) and ("radius" in alert_tags):
-                    context.add_object(
-                        staticmaps.Circle(
-                            center=staticmaps.create_latlng(
-                                *alert_tags["position"]
-                            ),
-                            radius_km=alert_tags["radius"],
-                            fill_color=(
-                                staticmaps.parse_color(style["fill_color"])
-                                if "fill_color" in style
-                                else None
-                            ),
-                            width=style.get("width"),
-                            color=(
-                                staticmaps.parse_color(style["color"])
-                                if "color" in style
-                                else None
-                            ),
+                        for t in (
+                            "identifier",
+                            "sent",
+                            "status",
+                            "msgType",
+                            "scope",
                         )
+                    ]
+                )
+
+                alert_log = log.getChild(
+                    "alert.%s" % alert_tags["identifier"]
+                )
+
+                # Look for the alert in the database
+                alert_log.debug(
+                    "Searching for alert src=%r and msg_id=%r",
+                    src,
+                    alert_tags["identifier"],
+                )
+                cur = status_db.cursor()
+                cur.execute(
+                    "SELECT * FROM alerts WHERE src=? AND msg_id=?;",
+                    (src, alert_tags["identifier"]),
+                )
+                db_alert = None
+                mstdn_status_id = None
+                for row in cur:
+                    db_alert = dict(zip((c[0] for c in cur.description), row))
+                    alert_log.debug("Observed %r", db_alert)
+                    prev_sev_level = SeverityLevel[db_alert["info_severity"]]
+                    mstdn_status_id = db_alert["mstdn_status_id"]
+                    alert_log.info(
+                        "Previously reported as post %r", mstdn_status_id
                     )
-                else:
+                    break
+
+                if mstdn_status_id is None:
+                    alert_log.info("Alert is NEW")
+
+                if db_alert and (db_alert["msg_sent"] == alert_tags["sent"]):
+                    alert_log.info("Alert is unchanged")
                     continue
 
-                if zoomlevel != "auto":
-                    context.set_zoom(zoomlevel)
+                alert_info = alert.find("./cap:info", namespaces=CAP_NS)
+                for t in (
+                    "language",
+                    "category",
+                    "responseType",
+                    "certainty",
+                    "expires",
+                    "senderName",
+                    "severity",
+                    "headline",
+                    "description",
+                    "instruction",
+                ):
+                    alert_tags[t] = alert_info.find(
+                        "./cap:%s" % t, namespaces=CAP_NS
+                    ).text
 
-                # render anti-aliased png (this only works if pycairo is installed)
-                image = context.render_cairo(
-                    MAP_DIMENSIONS["width"], MAP_DIMENSIONS["height"]
+                for field in ("description", "instruction"):
+                    if field in alert_tags:
+                        alert_tags[field] = cleanup_html(alert_tags[field])
+
+                cur_sev_level = SeverityLevel[alert_tags["severity"]]
+
+                mstdn_tags = []
+                for tagregex in tagregexes:
+                    mstdn_tags.extend(tagregex.extract(alert_tags))
+
+                alert_polygon = alert_info.find(
+                    "./cap:area/cap:polygon", namespaces=CAP_NS
                 )
-                imagefile = os.path.join(
-                    tmpdir,
-                    "%s-%s-%s.png"
-                    % (
-                        alert_tags["identifier"],
-                        zoomlevel,
-                        timestamp.strftime("%Y%m%d-%H%M"),
-                    ),
+                alert_circle = alert_info.find(
+                    "./cap:area/cap:circle", namespaces=CAP_NS
                 )
-                image.write_to_png(imagefile)
-                files.append(imagefile)
+                if alert_polygon is not None:
+                    alert_tags["polygon"] = [
+                        tuple((float(v) for v in c.split(",")))
+                        for c in alert_polygon.text.split(" ")
+                    ]
 
-            alert_log.info("Generated %d images", len(files))
+                if alert_circle is not None:
+                    (circle_coord_str, radius_str) = alert_circle.text.split(
+                        " "
+                    )
+                    alert_tags["position"] = tuple(
+                        (float(v) for v in circle_coord_str.split(","))
+                    )
+                    alert_tags["radius"] = float(radius_str)
+                    alert_tags["grid"] = get_gridsq(*alert_tags["position"])
 
-            post_text = post_template.render(**alert_tags).rstrip()
-
-            for tag in mstdn_tags:
-                post_text += " #%s" % tag
-
-            if args.dry_run:
-                alert_log.info(
-                    "Would post:\n%s\n…%s",
-                    post_text,
-                    (
-                        "as new post"
-                        if mstdn_status_id is None
-                        else ("as update to %r" % mstdn_status_id)
-                    ),
-                )
-                continue
-
-            media_ids = [
-                mastodon.media_post(media_file=file, mime_type="image/png")
-                for file in files
-            ]
-
-            if mstdn_status_id is None:
-                post = mastodon.status_post(
-                    status=post_text,
-                    media_ids=media_ids,
-                )
-                alert_log.debug("Post result: %r", post)
-                mstdn_status_id = post["id"]
-            else:
-                mastodon.status_update(
-                    id=mstdn_status_id,
-                    status=post_text,
-                    media_ids=media_ids,
+                alert_log.debug("Extracted alert: %r", alert_tags)
+                timestamp = datetime.datetime.fromisoformat(
+                    alert_tags["sent"]
                 )
 
-            update_db(src, alert_tags, mstdn_status_id)
+                # Do we need to do anything with this alert?
+                if (cur_sev_level < MIN_SEV_LEVEL) and (
+                    (db_alert is None) or (prev_sev_level < MIN_SEV_LEVEL)
+                ):
+                    alert_log.info(
+                        "Ignoring alert of severity %r",
+                        alert_tags["severity"],
+                    )
+                    update_db(src, alert_tags, mstdn_status_id)
+                    continue
 
-        if src_etag is not None:
-            if args.dry_run:
-                log.info("Dry run mode, not updating status")
-            else:
-                status_db.execute(
-                    """
-                    INSERT INTO sources (src, uri, etag) VALUES (?, ?, ?);
-                """,
-                    (src, src_cfg["uri"], src_etag),
-                )
-                status_db.commit()
-                src_log.info("Source file ETag recorded")
+                files = []
+                for zoomlevel in ZOOM_LEVELS:
+                    if args.dry_run:
+                        alert_log.info(
+                            "Skipping image at zoom level %s due to dry-run mode",
+                            zoomlevel,
+                        )
+                        continue
+
+                    context = staticmaps.Context()
+                    context.set_tile_provider(staticmaps.tile_provider_OSM)
+
+                    # Style information
+                    style = STYLES.get("_DEFAULT_", {})
+                    for field, styleinfo in STYLES.items():
+                        if field == "_DEFAULT_":
+                            continue
+
+                        try:
+                            value = alert_tags[field]
+                        except KeyError:
+                            continue
+
+                        try:
+                            valuestyle = styleinfo[value]
+                        except KeyError:
+                            pass
+
+                        style.update(valuestyle)
+
+                    if "polygon" in alert_tags:
+                        context.add_object(
+                            staticmaps.Area(
+                                [
+                                    staticmaps.create_latlng(lat, lng)
+                                    for lat, lng in alert_tags["polygon"]
+                                ],
+                                fill_color=(
+                                    staticmaps.parse_color(
+                                        style["fill_color"]
+                                    )
+                                    if "fill_color" in style
+                                    else None
+                                ),
+                                width=style.get("width"),
+                                color=(
+                                    staticmaps.parse_color(style["color"])
+                                    if "color" in style
+                                    else None
+                                ),
+                            )
+                        )
+                    elif ("position" in alert_tags) and (
+                        "radius" in alert_tags
+                    ):
+                        context.add_object(
+                            staticmaps.Circle(
+                                center=staticmaps.create_latlng(
+                                    *alert_tags["position"]
+                                ),
+                                radius_km=alert_tags["radius"],
+                                fill_color=(
+                                    staticmaps.parse_color(
+                                        style["fill_color"]
+                                    )
+                                    if "fill_color" in style
+                                    else None
+                                ),
+                                width=style.get("width"),
+                                color=(
+                                    staticmaps.parse_color(style["color"])
+                                    if "color" in style
+                                    else None
+                                ),
+                            )
+                        )
+                    else:
+                        continue
+
+                    if zoomlevel != "auto":
+                        context.set_zoom(zoomlevel)
+
+                    # render anti-aliased png (this only works if pycairo is installed)
+                    image = context.render_cairo(
+                        MAP_DIMENSIONS["width"], MAP_DIMENSIONS["height"]
+                    )
+                    imagefile = os.path.join(
+                        tmpdir,
+                        "%s-%s-%s.png"
+                        % (
+                            alert_tags["identifier"],
+                            zoomlevel,
+                            timestamp.strftime("%Y%m%d-%H%M"),
+                        ),
+                    )
+                    image.write_to_png(imagefile)
+                    files.append(imagefile)
+
+                alert_log.info("Generated %d images", len(files))
+
+                post_text = post_template.render(**alert_tags).rstrip()
+
+                for tag in mstdn_tags:
+                    post_text += " #%s" % tag
+
+                if args.dry_run:
+                    alert_log.info(
+                        "Would post:\n%s\n…%s",
+                        post_text,
+                        (
+                            "as new post"
+                            if mstdn_status_id is None
+                            else ("as update to %r" % mstdn_status_id)
+                        ),
+                    )
+                    continue
+
+                media_ids = [
+                    mastodon.media_post(
+                        media_file=file, mime_type="image/png"
+                    )
+                    for file in files
+                ]
+
+                if mstdn_status_id is None:
+                    post = mastodon.status_post(
+                        status=post_text,
+                        media_ids=media_ids,
+                    )
+                    alert_log.debug("Post result: %r", post)
+                    mstdn_status_id = post["id"]
+                else:
+                    mastodon.status_update(
+                        id=mstdn_status_id,
+                        status=post_text,
+                        media_ids=media_ids,
+                    )
+
+                update_db(src, alert_tags, mstdn_status_id)
+
+            if src_etag is not None:
+                if args.dry_run:
+                    log.info("Dry run mode, not updating status")
+                else:
+                    status_db.execute(
+                        """
+                        INSERT INTO sources (src, uri, etag) VALUES (?, ?, ?);
+                    """,
+                        (src, src_cfg["uri"], src_etag),
+                    )
+                    status_db.commit()
+                    src_log.info("Source file ETag recorded")
