@@ -643,11 +643,12 @@ with lock:
                     alert_log.debug("Post result: %r", post)
                     mstdn_status_id = post["id"]
                 else:
-                    mastodon.status_update(
+                    post = mastodon.status_update(
                         id=mstdn_status_id,
                         status=post_text,
                         media_ids=media_ids,
                     )
+                    alert_log.debug("Post update result: %r", post)
 
                 update_db(src, alert_tags, mstdn_status_id)
 
