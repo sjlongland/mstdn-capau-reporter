@@ -435,17 +435,20 @@ with lock:
                     alert_log.debug("Observed %r", db_alert)
                     prev_sev_level = SeverityLevel[db_alert["info_severity"]]
                     mstdn_status_id = db_alert["mstdn_status_id"]
-                    alert_log.info(
-                        "Previously reported as post %r", mstdn_status_id
-                    )
                     break
-
-                if mstdn_status_id is None:
-                    alert_log.info("Alert is NEW")
 
                 if db_alert and (db_alert["msg_sent"] == alert_tags["sent"]):
                     alert_log.info("Alert is unchanged")
                     continue
+
+                if db_alert is None:
+                    alert_log.info("Alert is NEW")
+                elif mstdn_status_id is None:
+                    alert_log.info("Alert is UNREPORTED")
+                else:
+                    alert_log.info(
+                        "Previously reported as post %r", mstdn_status_id
+                    )
 
                 alert_info = alert.find("./cap:info", namespaces=CAP_NS)
                 for t in (
