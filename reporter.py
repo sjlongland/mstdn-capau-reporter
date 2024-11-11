@@ -473,9 +473,39 @@ with lock:
 
                 cur_sev_level = SeverityLevel[alert_tags["severity"]]
 
+                alert_params = {}
+                alert_tags["parameters"] = alert_params
+                for paramtag in alert_info.iterfind(
+                    "./cap:parameter", namespaces=CAP_NS
+                ):
+                    param = paramtag.find(
+                        "./cap:valueName", namespaces=CAP_NS
+                    )
+                    value = paramtag.find("./cap:value", namespaces=CAP_NS)
+
+                    if (param is not None) and (value is not None):
+                        alert_params[param.text] = value.text
+
                 mstdn_tags = []
                 for tagregex in tagregexes:
                     mstdn_tags.extend(tagregex.extract(alert_tags))
+
+                _tags = set(mstdn_tags)
+                for param in ("Location", "AlertLevel", "IncidentType"):
+                    try:
+                        value = alert_params[param]
+                    except KeyError:
+                        continue
+
+                    if param == "Location":
+                        value += "Qld"
+
+                    tag = TagRegex.mktag(value)
+                    if tag in _tags:
+                        continue
+
+                    mstdn_tags.append(tag)
+                    _tags.add(tag)
 
                 alert_polygon = alert_info.find(
                     "./cap:area/cap:polygon", namespaces=CAP_NS
