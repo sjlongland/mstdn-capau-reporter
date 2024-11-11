@@ -498,7 +498,7 @@ with lock:
                         continue
 
                     if param == "Location":
-                        value += "Qld"
+                        value += " Qld"
 
                     tag = TagRegex.mktag(value)
                     if tag in _tags:
