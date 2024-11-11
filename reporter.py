@@ -382,18 +382,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         with open(src_file, "w") as f:
             f.write(response.text)
 
-        if "ETag" in response.headers:
-            if args.dry_run:
-                log.info("Dry run mode, not updating status")
-            else:
-                status_db.execute(
-                    """
-                    INSERT INTO sources (src, uri, etag) VALUES (?, ?, ?);
-                """,
-                    (src, src_cfg["uri"], response.headers["ETag"]),
-                )
-                status_db.commit()
-                src_log.info("Source file ETag recorded")
+        src_etag = response.headers.get("ETag")
 
         alerts_xmldoc = lxml.etree.parse(src_file)
         for alert in alerts_xmldoc.iterfind(
@@ -636,3 +625,16 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 )
 
             update_db(src, alert_tags, mstdn_status_id)
+
+        if src_etag is not None:
+            if args.dry_run:
+                log.info("Dry run mode, not updating status")
+            else:
+                status_db.execute(
+                    """
+                    INSERT INTO sources (src, uri, etag) VALUES (?, ?, ?);
+                """,
+                    (src, src_cfg["uri"], src_etag),
+                )
+                status_db.commit()
+                src_log.info("Source file ETag recorded")
