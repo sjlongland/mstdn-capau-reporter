@@ -54,6 +54,7 @@ jinja2_env = jinja2.Environment(autoescape=jinja2.select_autoescape())
 BR_RE = re.compile(r"<br */*>")
 A_RE = re.compile(r'<a *href="([^"]+)" *>([^<>]+)</a>')
 
+# Argument parsing
 ap = argparse.ArgumentParser()
 ap.add_argument(
     "--dry-run",
@@ -78,22 +79,34 @@ ap.add_argument(
 )
 ap.add_argument("config_yml", help="Configuration File")
 
+# Parse command line arguments
 args = ap.parse_args()
 
+# Load the configuration, extract config settings
 config = yaml.safe_load(open(args.config_yml, "r").read())
 MIN_SEV_LEVEL = SeverityLevel[config.get("min_severity_level", "Moderate")]
 STYLES = config.get("styles", {})
 ZOOM_LEVELS = config.get("zoom_levels", ["auto"])
 MAP_DIMENSIONS = config.get("map_size", dict(width=800, height=500))
 
+# Set up a lock-file to prevent concurrent execution
 lock = lockfile.LockFile(config.get("lockfile", args.config_yml))
+
+# Connect to a SQLite3 database for persistence
 status_db = sqlite3.connect(config["status_db"])
+
+# Set up a Mastodon client for posting notifications
 mastodon = Mastodon(**config["mastodon"])
+
+# Set up a requests session for fetching alerts
 rqsession = requests.Session()
 
+# Set up logging infrastructure for debugging
 logging.basicConfig(level=logging.DEBUG)
-logging.getLogger("PIL").setLevel(logging.INFO)
+logging.getLogger("PIL").setLevel(logging.INFO)  # PIL is noisy!
 log = logging.getLogger("capau_alerter")
+
+# Database schema initialisation, for cases where the database is empty.
 
 status_db.execute(
     """
@@ -141,6 +154,11 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 
 class TagRegex(object):
+    """
+    TagRegex is a helper class for extracting and generating tags from the
+    incoming alert and producing a text string usable as a tag.
+    """
+
     def __init__(self, field, regex, tags, log):
         self._field = field
         self._tags = tags
@@ -154,6 +172,10 @@ class TagRegex(object):
             raise
 
     def extract(self, alert_tags):
+        """
+        Inspect the alert "tags" received from the CAP-AU feed and match
+        those to the regular expression provided.
+        """
         if self._field not in alert_tags:
             self._log.debug("%r not in %r", self._field, alert_tags)
             return
@@ -193,11 +215,18 @@ class TagRegex(object):
 
     @staticmethod
     def mktag(s):
+        """
+        Take an arbitrary string with spaces and turn it into a TitleCasedTag.
+        """
         s = UNSAFE_TAG_CHARS_RE.sub("", s).strip()
         return "".join((w.title() for w in s.split(" ")))
 
 
 def get_gridsq(lat, lng):
+    """
+    Convert latitude/longitude to a maidenhead grid square for the purpose
+    of generating a concise "tag" reflecting the location of a threat.
+    """
     # Offset the latitude / longitude so 0, 0 corresponds to the western
     # part of Antarctica
     lng += 180
@@ -226,6 +255,10 @@ def get_gridsq(lat, lng):
 
 
 def cleanup_html(text):
+    """
+    Extract some HTML from the alert and re-format it to be more readable as
+    plain text.
+    """
     # Strip carriage returns
     text = text.replace("\r", "")
 
@@ -241,6 +274,10 @@ def cleanup_html(text):
 
 
 def update_db(src, alert_tags, mstdn_status_id=None):
+    """
+    Insert a new alert into the alert database, or update the existing record
+    (via the ON CONFLICT REPLACE clause in the table's primary key definition).
+    """
     if args.dry_run:
         log.info("Dry run mode, not updating status")
         return
@@ -342,15 +379,22 @@ INSERT INTO alerts (
     )
 
 
+# ----- Start of reporter activity -----
+
+
 assert not lock.is_locked(), "Report generation in progress"
 with lock:
     with tempfile.TemporaryDirectory() as tmpdir:
+        # Iterate over all the sources and extract the alerts.
         for src, src_cfg in config["sources"].items():
             src_log = log.getChild("sources.%s" % src)
 
+            # Configuration shorthand, if the config is a string, wrap it
+            # in a dict with equivalent settings.
             if isinstance(src_cfg, str):
                 src_cfg = dict(uri=src_cfg)
 
+            # Extract the template, or bail if it isn't defined somewhere.
             post_template_src = src_cfg.get(
                 "post_template", config.get("post_template")
             )
@@ -359,14 +403,18 @@ with lock:
             ), "Post template must be defined either globally or per source"
             post_template = jinja2_env.from_string(post_template_src)
 
+            # Set up the tag regular expressions
             tagregexes = [
                 TagRegex(**tagcfg, log=src_log.getChild("tagregex%d" % idx))
                 for (idx, tagcfg) in enumerate(src_cfg.get("tagregex", []))
             ]
 
-            # Look for the last ETag value
+            # Look for the last ETag value, we skip processing this source
+            # if the ETag value we receive is not different to the one we have
+            # on file already.
             src_last = None
             if not args.ignore_etag:
+                # Read the existing ETag value
                 cur = status_db.cursor()
                 cur.execute(
                     "SELECT * FROM sources WHERE src=?;",
@@ -376,12 +424,16 @@ with lock:
                     src_last = dict(zip((c[0] for c in cur.description), row))
                     break
 
+                # If there is an existing row, and it's for a different URI,
+                # ignore the existing row and pretend this is a new source.
                 if (src_last is not None) and (
                     src_last["uri"] != src_cfg["uri"]
                 ):
                     src_last = None
 
                 if src_last is not None:
+                    # Do a HEAD query to fetch the ETag, then compare it
+                    # to the value in the database.
                     response = rqsession.head(src_cfg["uri"])
                     try:
                         if src_last["etag"] == response.headers["Etag"]:
@@ -390,19 +442,25 @@ with lock:
                     except KeyError:
                         pass
 
+            # If we get here, then the source is new or has changed.
+            # Download the file and stick it in our temp directory for
+            # parsing.
+
             src_file = os.path.join(tmpdir, "%s.xml" % src)
 
             response = rqsession.get(src_cfg["uri"])
             with open(src_file, "w") as f:
                 f.write(response.text)
 
+            # Make a note of the ETag seen in that response.
             src_etag = response.headers.get("ETag")
 
+            # Parse the XML and start iterating over the alerts.
             alerts_xmldoc = lxml.etree.parse(src_file)
             for alert in alerts_xmldoc.iterfind(
                 ".//cap:alert", namespaces=CAP_NS
             ):
-
+                # Extract the "tags" for this event:
                 alert_tags = dict(
                     [
                         (
@@ -412,15 +470,16 @@ with lock:
                             ).text,
                         )
                         for t in (
-                            "identifier",
-                            "sent",
-                            "status",
-                            "msgType",
-                            "scope",
+                            "identifier",  # Publisher Event ID
+                            "sent",  # Sent timestamp
+                            "status",  # Event status
+                            "msgType",  # Type of message
+                            "scope",  # Event scope
                         )
                     ]
                 )
 
+                # Create a log for this event, for debugging
                 alert_log = log.getChild(
                     "alert.%s" % alert_tags["identifier"]
                 )
@@ -445,6 +504,8 @@ with lock:
                     mstdn_status_id = db_alert["mstdn_status_id"]
                     break
 
+                # Compare our sent timestamp to the database, if it's the same
+                # then skip processing this event.
                 if (
                     not args.ignore_sent
                     and db_alert
@@ -462,6 +523,7 @@ with lock:
                         "Previously reported as post %r", mstdn_status_id
                     )
 
+                # Extract some more information into the alert tags.
                 alert_info = alert.find("./cap:info", namespaces=CAP_NS)
                 for t in (
                     "language",
@@ -479,12 +541,15 @@ with lock:
                         "./cap:%s" % t, namespaces=CAP_NS
                     ).text
 
+                # Strip HTML from tags that are known to contain it.
                 for field in ("description", "instruction"):
                     if field in alert_tags:
                         alert_tags[field] = cleanup_html(alert_tags[field])
 
+                # Parse the severity level
                 cur_sev_level = SeverityLevel[alert_tags["severity"]]
 
+                # Extract event "parameters"
                 alert_params = {}
                 alert_tags["parameters"] = alert_params
                 for paramtag in alert_info.iterfind(
@@ -498,6 +563,7 @@ with lock:
                     if (param is not None) and (value is not None):
                         alert_params[param.text] = value.text
 
+                # Extract the Mastodon tags from the event tags.
                 mstdn_tags = []
                 for tagregex in tagregexes:
                     mstdn_tags.extend(tagregex.extract(alert_tags))
@@ -509,6 +575,12 @@ with lock:
                     except KeyError:
                         continue
 
+                    # There's more than one "Ipswich" for example, so suffix
+                    # " Qld" on the end to ensure the resulting tag does not
+                    # mix up IpswichQld and IpswichUK for example.
+                    if param == "Location":
+                        value += " Qld"
+
                     tag = TagRegex.mktag(value)
                     if tag in _tags:
                         continue
@@ -516,6 +588,7 @@ with lock:
                     mstdn_tags.append(tag)
                     _tags.add(tag)
 
+                # Figure out the affected area for the maps.
                 alert_polygon = alert_info.find(
                     "./cap:area/cap:polygon", namespaces=CAP_NS
                 )
@@ -554,11 +627,13 @@ with lock:
                     update_db(src, alert_tags, mstdn_status_id)
                     continue
 
+                # Render the maps
                 files = []
                 for zoomlevel in ZOOM_LEVELS:
                     if args.dry_run:
                         alert_log.info(
-                            "Skipping image at zoom level %s due to dry-run mode",
+                            "Skipping image at zoom level %s due to "
+                            "dry-run mode",
                             zoomlevel,
                         )
                         continue
@@ -585,6 +660,9 @@ with lock:
                         style.update(valuestyle)
 
                     if "polygon" in alert_tags:
+                        # We have a polygon, use that in preference to a
+                        # circle since that conveys greater detail of the
+                        # affected area.
                         context.add_object(
                             staticmaps.Area(
                                 [
@@ -609,6 +687,8 @@ with lock:
                     elif ("position" in alert_tags) and (
                         "radius" in alert_tags
                     ):
+                        # If we only have a circle, use that to highlight the
+                        # affected area.
                         context.add_object(
                             staticmaps.Circle(
                                 center=staticmaps.create_latlng(
@@ -631,12 +711,15 @@ with lock:
                             )
                         )
                     else:
+                        # Neither circle nor polygon, no point in showing a
+                        # map since we don't know where the threat is.
                         continue
 
                     if zoomlevel != "auto":
                         context.set_zoom(zoomlevel)
 
-                    # render anti-aliased png (this only works if pycairo is installed)
+                    # render anti-aliased png (this only works if pycairo is
+                    # installed)
                     image = context.render_cairo(
                         MAP_DIMENSIONS["width"], MAP_DIMENSIONS["height"]
                     )
@@ -654,12 +737,16 @@ with lock:
 
                 alert_log.info("Generated %d images", len(files))
 
+                # Render the text that will appear in the post.
                 post_text = post_template.render(**alert_tags).rstrip()
 
+                # Append tags to the post
                 for tag in mstdn_tags:
                     post_text += " #%s" % tag
 
                 if args.dry_run:
+                    # Dry run: display what would be posted without actually
+                    # posting it.
                     alert_log.info(
                         "Would post:\n%s\n…%s",
                         post_text,
@@ -671,6 +758,7 @@ with lock:
                     )
                     continue
 
+                # Upload the maps generated
                 media_ids = [
                     mastodon.media_post(
                         media_file=file, mime_type="image/png"
@@ -679,6 +767,7 @@ with lock:
                 ]
 
                 if mstdn_status_id is None:
+                    # Event has not been posted yet, so publish a new post.
                     post = mastodon.status_post(
                         status=post_text,
                         media_ids=media_ids,
@@ -686,6 +775,7 @@ with lock:
                     alert_log.debug("Post result: %r", post)
                     mstdn_status_id = post["id"]
                 else:
+                    # Update the existing post with new information
                     post = mastodon.status_update(
                         id=mstdn_status_id,
                         status=post_text,
@@ -693,12 +783,14 @@ with lock:
                     )
                     alert_log.debug("Post update result: %r", post)
 
+                # Update the status in the database
                 update_db(src, alert_tags, mstdn_status_id)
 
             if src_etag is not None:
                 if args.dry_run:
                     log.info("Dry run mode, not updating status")
                 else:
+                    # Record the new ETag in the database
                     status_db.execute(
                         """
                         INSERT INTO sources (src, uri, etag) VALUES (?, ?, ?);
