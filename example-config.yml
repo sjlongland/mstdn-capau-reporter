@@ -7,25 +7,33 @@ sources:
         regex: "^([A-Z ]+)?(?: \\((HAZARD REDUCTION BURN)\\))?(?:[A-Za-z ]+)? - ([^()-]+)(?: +\\((?:near )?(.+)\\))?(?: - Multiple Warnings)? - fire as at.*$"
         tags:
           - template: '{{tag}}'
+            category: Instruction
           - template: '{{tag}}'
+            category: IncidentType
           - template: '{{tag}} Qld'
             transform: 'tag.replace(" and ", ", ").split(", ")'
+            category: Location
           - template: '{{tag}} Qld'
+            category: Location
 
     post_template: |
-      DISCLAIMER: This is an unofficial and experimental service run by a third party.
-      See https://www.fire.qld.gov.au/Current-Incidents for official warnings from
-      the QFD.  DO NOT RELY ON THIS SERVICE FOR TIMELY EMERGENCY WARNINGS.
+      {{headline}} ({{identifier}}) {{tags.iter("Instruction") | join(" ")}} {{tags.iter("Location") | join(" ")}} #QLDFire #BushfireWarning
 
-      {{headline}} ({{identifier}})
-      Severity: {{severity}} Action: {{responseType}}
+      See https://www.fire.qld.gov.au/Current-Incidents for official warnings from the QFD.  DO NOT RELY ON THIS SERVICE FOR TIMELY EMERGENCY WARNINGS.
+
+      Location: {{parameters["Location"]}}
+      Map: https://www.openstreetmap.org/#map=14/{{position[0]}}/{{position[1]}}
+      Incident Type: {{parameters["IncidentType"]}}
+      Alert Level: {{parameters["AlertLevel"]}}
+      Severity: {{severity}}
+      Action: {{responseType}}
       Expires: {{expires}}
 
       {{description}}
 
       {{instruction}}
 
-      #BushfireWarning #{{grid}}
+      - See https://help.abc.net.au/hc/en-us/articles/5896732505103-How-can-I-find-ABC-TV-and-radio-frequencies-in-my-area for a listing of ABC Local Radio stations which may be broadcasting emergency information in your area.
 
 min_severity_level: Moderate
 
@@ -61,6 +69,8 @@ zoom_levels:
   - 6
   - 10
   - 14
+
+status_db: status.db
 
 mastodon:
   access_token: Insert Your Token Here
