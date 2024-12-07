@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: MIT
 
 import argparse
+import collections.abc
 import datetime
 import enum
 import html
@@ -211,7 +212,7 @@ class TagRegex(object):
                 self._log.debug(
                     "Extracted from %r tag %r: %r", matchvalue, tagvalue, tag
                 )
-                yield tag
+                yield (tagconfig.get("category"), tag)
 
     @staticmethod
     def mktag(s):
@@ -220,6 +221,69 @@ class TagRegex(object):
         """
         s = UNSAFE_TAG_CHARS_RE.sub("", s).strip()
         return "".join((w.title() for w in s.split(" ")))
+
+
+class OrderedSet(collections.abc.MutableSet):
+    """
+    A set that maintains the order of the elements inserted.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super(OrderedSet, self).__init__(*args, **kwargs)
+        self._order = []
+        self._presence = set()
+
+    def __contains__(self, value):
+        return value in self._presence
+
+    def __getitem__(self, idx):
+        return self._order[idx]
+
+    def __iter__(self):
+        return iter(self._order)
+
+    def __len__(self):
+        return len(self._order)
+
+    def add(self, value):
+        if value not in self._presence:
+            self._order.append(value)
+            self._presence.add(value)
+
+    def discard(self, value):
+        if value in self._presence:
+            self._order.remove(value)
+            self._presence.discard(value)
+
+
+class TagCollection(object):
+    """
+    A container for storing collections of tags.
+    """
+
+    def __init__(self):
+        self._all = OrderedSet()
+        self._cat = {}
+
+    def add(self, tag, category=None):
+        if not tag.startswith("#"):
+            tag = "#" + tag
+
+        self._all.add(tag)
+        if category is not None:
+            self._cat.setdefault(category, OrderedSet()).add(tag)
+
+    def __iter__(self):
+        return self.iter()
+
+    def iter(self, category=None):
+        if category is None:
+            return iter(self._all)
+        else:
+            try:
+                return iter(self._cat[category])
+            except KeyError:
+                return iter([])
 
 
 def get_gridsq(lat, lng):
@@ -564,12 +628,12 @@ with lock:
                         alert_params[param.text] = value.text
 
                 # Extract the Mastodon tags from the event tags.
-                mstdn_tags = []
+                mstdn_tags = TagCollection()
                 for tagregex in tagregexes:
-                    mstdn_tags.extend(tagregex.extract(alert_tags))
+                    for tagcategory, tag in tagregex.extract(alert_tags):
+                        mstdn_tags.add(tag, category=tagcategory)
 
-                _tags = set(mstdn_tags)
-                for param in ("AlertLevel", "IncidentType"):
+                for param in ("Location", "AlertLevel", "IncidentType"):
                     try:
                         value = alert_params[param]
                     except KeyError:
@@ -582,11 +646,10 @@ with lock:
                         value += " Qld"
 
                     tag = TagRegex.mktag(value)
-                    if tag in _tags:
-                        continue
 
-                    mstdn_tags.append(tag)
-                    _tags.add(tag)
+                    # Avoid overly long tags.
+                    if len(tag) < 20:
+                        mstdn_tags.add(tag, category=param)
 
                 # Figure out the affected area for the maps.
                 alert_polygon = alert_info.find(
@@ -610,6 +673,7 @@ with lock:
                     )
                     alert_tags["radius"] = float(radius_str)
                     alert_tags["grid"] = get_gridsq(*alert_tags["position"])
+                    mstdn_tags.add(alert_tags["grid"], category="Location")
 
                 alert_log.debug("Extracted alert: %r", alert_tags)
                 timestamp = datetime.datetime.fromisoformat(
@@ -738,11 +802,13 @@ with lock:
                 alert_log.info("Generated %d images", len(files))
 
                 # Render the text that will appear in the post.
-                post_text = post_template.render(**alert_tags).rstrip()
+                post_text = post_template.render(
+                    **alert_tags, tags=mstdn_tags
+                ).rstrip()
 
                 # Append tags to the post
                 for tag in mstdn_tags:
-                    post_text += " #%s" % tag
+                    post_text += " " + tag
 
                 if args.dry_run:
                     # Dry run: display what would be posted without actually
